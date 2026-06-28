@@ -129,16 +129,25 @@ _TIKTOK_PORTRAIT_DIRECTIVE_EN = (
 def _inject_tiktok_directive(focus_prompt: str) -> str:
     """Prepend the 9:16 TikTok directive to focus_prompt for slide_deck.
 
-    Idempotent: if the user already wrote "9:16" or "Vertical" in their
-    prompt, we don't duplicate the directive. This respects callers who
-    hand-craft their own English prompt.
+    Idempotent: if the user already wrote the English directive verbatim
+    in their prompt, we don't duplicate it. We detect this by looking for
+    the exact English phrases NotebookLM actually honors — NOT the bare
+    substring "9:16", because Vietnamese prompts frequently mention
+    "kích thước 9:16" or "tỉ lệ 9:16" which has zero effect on the model
+    but would falsely trip the idempotence check.
     """
     fp = (focus_prompt or "").strip()
     directive = _TIKTOK_PORTRAIT_DIRECTIVE_EN
     if not fp:
         return directive
     lowered = fp.lower()
-    if "9:16" in lowered or "vertical" in lowered or "9 : 16" in lowered:
+    # Only skip when the user already wrote the English directive verbatim.
+    has_english_directive = (
+        "vertical" in lowered
+        or "9:16 ratio" in lowered
+        or "9 : 16 ratio" in lowered
+    )
+    if has_english_directive:
         return fp
     return f"{directive}\n\n{fp}"
 

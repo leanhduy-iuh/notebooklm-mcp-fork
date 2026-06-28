@@ -84,6 +84,25 @@ class TestInjectTiktokDirective:
         result = _inject_tiktok_directive(original)
         assert result == original
 
+    def test_bare_vietnamese_916_still_gets_directive(self):
+        """Regression test: a Vietnamese prompt that only mentions '9:16'
+        in passing (e.g. 'tỉ lệ 9:16') MUST still get the English directive,
+        because NotebookLM only honors the exact English phrase."""
+        original = "Tất cả slide phải có kích thước 9:16 (viết bằng tiếng Việt)"
+        result = _inject_tiktok_directive(original)
+        assert result.startswith("Create a slide deck for TikTok")
+        assert original in result
+        # Directive must appear exactly once (English + the Vietnamese mention)
+        assert result.count("Vertical 9:16 ratio") == 1
+
+    def test_bare_916_number_alone_still_gets_directive(self):
+        """A bare '9:16' substring without English context must not trip
+        the idempotence check."""
+        original = "Làm slide 9:16 cho TikTok"
+        result = _inject_tiktok_directive(original)
+        assert result.startswith("Create a slide deck for TikTok")
+        assert original in result
+
     def test_idempotent(self):
         """Calling twice must not duplicate the directive."""
         original = "My custom slide content"
