@@ -61,6 +61,88 @@ def _normalize_studio_validation_error(message: str) -> str:
     return message
 
 
+# Patch duy: friendly language name → BCP-47 code.
+# NotebookLM only accepts BCP-47 (e.g. "vi", "en", "ja"). Passing
+# "Vietnamese" or "English" silently falls back to English. This map
+# catches the most common friendly names callers are likely to use.
+_LANGUAGE_ALIASES = {
+    "vietnamese": "vi",
+    "tieng viet": "vi",
+    "tiếng việt": "vi",
+    "english": "en",
+    "spanish": "es",
+    "espanol": "es",
+    "español": "es",
+    "french": "fr",
+    "francais": "fr",
+    "français": "fr",
+    "german": "de",
+    "deutsch": "de",
+    "japanese": "ja",
+    "nihongo": "ja",
+    "日本語": "ja",
+    "chinese": "zh",
+    "中文": "zh",
+    "korean": "ko",
+    "한국어": "ko",
+    "portuguese": "pt",
+    "português": "pt",
+}
+
+
+def _normalize_language(language: str) -> str:
+    """Normalize a language string to BCP-47 code.
+
+    - Already-codes like "vi", "en", "ja" pass through unchanged.
+    - Friendly names like "Vietnamese" map to "vi".
+    - Empty string passes through (handled upstream as default).
+    """
+    if not language:
+        return language
+    stripped = language.strip()
+    # Must be ASCII to qualify as a BCP-47 code; CJK/other scripts are
+    # always friendly names (e.g. "日本語") and must go through the alias map.
+    if len(stripped) <= 3 and stripped.isascii():
+        return stripped
+    lower = stripped.lower()
+    if lower in _LANGUAGE_ALIASES:
+        return _LANGUAGE_ALIASES[lower]
+    # Contains region subtag already (e.g. "vi-VN") → pass through.
+    if "-" in stripped and len(stripped.split("-")[0]) <= 3:
+        return stripped
+    # Unknown friendly name → return as-is and let NotebookLM validate.
+    return stripped
+
+
+# Patch duy: the English directive NotebookLM honors to force 9:16 portrait
+# slides. Captured from the working manual workflow (typed into NotebookLM's
+# "Describe your presentation" box on the web UI). The model only respects
+# this phrase when it appears verbatim in the focus_prompt.
+_TIKTOK_PORTRAIT_DIRECTIVE_EN = (
+    "Create a slide deck for TikTok (Vertical 9:16 ratio). "
+    "Use a modern, light-colored background. "
+    "Text must be extremely concise (under 20 words). "
+    "All text must be in Vietnamese."
+)
+
+
+def _inject_tiktok_directive(focus_prompt: str) -> str:
+    """Prepend the 9:16 TikTok directive to focus_prompt for slide_deck.
+
+    Idempotent: if the user already wrote "9:16" or "Vertical" in their
+    prompt, we don't duplicate the directive. This respects callers who
+    hand-craft their own English prompt.
+    """
+    fp = (focus_prompt or "").strip()
+    directive = _TIKTOK_PORTRAIT_DIRECTIVE_EN
+    if not fp:
+        return directive
+    lowered = fp.lower()
+    if "9:16" in lowered or "vertical" in lowered or "9 : 16" in lowered:
+        return fp
+    return f"{directive}\n\n{fp}"
+
+
 @logged_tool()
 def studio_create(
     notebook_id: str,
@@ -117,7 +199,7 @@ def studio_create(
         - audio: audio_format (deep_dive|brief|critique|debate), audio_length (short|default|long)
         - video: video_format (explainer|brief|cinematic), visual_style (auto_select|custom|classic|whiteboard|kawaii|anime|watercolor|retro_print|heritage|paper_craft), video_style_prompt
         - infographic: orientation (landscape|portrait|square), detail_level (concise|standard|detailed), infographic_style (auto_select|sketch_note|professional|bento_grid|editorial|instructional|bricks|clay|anime|kawaii|scientific)
-        - slide_deck: slide_format (detailed_deck|presenter_slides), slide_length (short|default)
+        - slide_deck: slide_format (detailed_deck|presenter_slides), slide_length (short|default), orientation (landscape|portrait)
         - report: report_format (Briefing Doc|Study Guide|Blog Post|Create Your Own), custom_prompt
         - flashcards: difficulty (easy|medium|hard)
         - quiz: question_count (int), difficulty (easy|medium|hard)
@@ -125,8 +207,15 @@ def studio_create(
         - mind_map: title
 
         Common options:
-        - language: BCP-47 code (en, es, fr, de, ja). Defaults to NOTEBOOKLM_HL env var or 'en'
+        - language: BCP-47 code (en, es, fr, de, ja, vi) OR friendly name (English, Vietnamese, French...). Defaults to NOTEBOOKLM_HL env var or 'en'. NOTE: "Vietnamese" is auto-mapped to "vi".
         - focus_prompt: Optional focus text
+
+        Slide deck orientation note:
+        - NotebookLM has no native 9:16 field for slide_deck. Passing
+          orientation="portrait" auto-prepends an English directive
+          ("Create a slide deck for TikTok (Vertical 9:16 ratio)...")
+          to focus_prompt. If you write your own prompt containing
+          "9:16" or "Vertical", we won't duplicate it.
 
     Example:
         studio_create(notebook_id="abc", artifact_type="audio", confirm=True)
@@ -134,6 +223,22 @@ def studio_create(
     """
     if not language:
         language = get_default_language()
+
+    # Patch duy: normalize language — accept common names ("Vietnamese")
+    # in addition to BCP-47 codes ("vi"). NotebookLM silently falls back to
+    # English when the value isn't a valid BCP-47 code, which is the #1 cause
+    # of "wrong language" bug reports. Map known friendly names here.
+    language = _normalize_language(language)
+
+    # Patch duy: NotebookLM has NO orientation field for slide_deck in its RPC.
+    # The only way to get portrait (9:16) slides is to inject an English
+    # directive into focus_prompt. When the caller passes
+    # orientation="portrait" for a slide_deck, we auto-prepend that directive
+    # so the AGENTS.md contract `orientation: "portrait"` actually works.
+    # This mirrors the manual workflow where the user types
+    # "Vertical 9:16 ratio" into the "Describe your presentation" box.
+    if artifact_type == "slide_deck" and orientation == "portrait":
+        focus_prompt = _inject_tiktok_directive(focus_prompt)
 
     # Coerce list params from MCP clients (may arrive as strings)
     source_ids = coerce_list(source_ids)
